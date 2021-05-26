@@ -1,0 +1,27 @@
+{
+  "name": "beldex-protocol-frontend",
+  "version": "1.0.0",
+  "description": "",
+  "main": "src/index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Beldex-Coin/beldex-protocol-frontend.git"
+  },
+  "author": "bdx",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/Beldex-Coin/beldex-protocol-frontend/issues"
+  },
+  "homepage": "https://github.com/Beldex-Coin/beldex-protocol-frontend#readme" ,
+  "dependencies": {
+    "@truffle/hdwallet-provider": "^1.4.0",
+    "bn.js": "^5.1.3",
+    "elliptic": "^6.5.3",
+    "eth-hd-wallet": "^0.5.1",
+    "openzeppelin-solidity": "^3.2.0",
+    "web3": "^1.3.0"
+  }
+}
