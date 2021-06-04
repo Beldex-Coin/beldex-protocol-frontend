@@ -104,7 +104,58 @@ class RedeemProver {
                 bn128.bytes(z),
                 ...polyCommitment.getCommitments().map(bn128.serialize),
             ]));
+            var evalCommit = polyCommitment.evaluate(x);
+            proof.tHat = evalCommit.getX();
+            var tauX = evalCommit.getR();
+            proof.mu = alpha.redAdd(rho.redMul(x));
 
+            var k_sk = bn128.randomScalar();
+            var k_b = bn128.randomScalar();
+            var k_tau = bn128.randomScalar();
+
+            var A_y = params.getG().mul(k_sk);
+            var A_b = params.getG().mul(k_b).add(statement['CRn'].mul(zs[0]).mul(k_sk));
+            var A_t = params.getG().mul(k_b.redNeg()).add(params.getH().mul(k_tau));
+            var A_u = utils.gEpoch(statement['epoch']).mul(k_sk);
+
+            proof.c = utils.hash(ABICoder.encodeParameters([
+                'bytes32',
+                'bytes32[2]',
+                'bytes32[2]',
+                'bytes32[2]',
+                'bytes32[2]',
+            ], [
+                bn128.bytes(x),
+                bn128.serialize(A_y),
+                bn128.serialize(A_b),
+                bn128.serialize(A_t),
+                bn128.serialize(A_u),
+            ]));
+
+            proof.s_sk = k_sk.redAdd(proof.c.redMul(witness['sk']));
+            proof.s_b = k_b.redAdd(proof.c.redMul(witness['bDiff'].redMul(zs[0])));
+            proof.s_tau = k_tau.redAdd(proof.c.redMul(tauX));
+
+            var gs = params.getGs();
+            var hPrimes = params.getHs().hadamard(ys.invert());
+            var hExp = ys.times(z).add(twoTimesZs);
+            var P = proof.BA.add(proof.BS.mul(x)).add(gs.sum().mul(z.redNeg())).add(hPrimes.commit(hExp)); // rename of P
+            P = P.add(params.getH().mul(proof.mu.redNeg())); // Statement P of protocol 1. should this be included in the calculation of v...?
+
+            var o = utils.hash(ABICoder.encodeParameters([
+                'bytes32',
+            ], [
+                bn128.bytes(proof.c),
+            ]));
+
+            var u_x = params.getG().mul(o); // Begin Protocol 1. this is u^x in Protocol 1. use our g for their u, our o for their x.
+            P = P.add(u_x.mul(proof.tHat)); // corresponds to P' in protocol 1.
+            var primeBase = new GeneratorParams(u_x, gs, hPrimes);
+            var ipStatement = { 'primeBase': primeBase, 'P': P };
+            var ipWitness = { 'l': lPoly.evaluate(x), 'r': rPoly.evaluate(x) };
+            proof.ipProof = ipProver.generateProof(ipStatement, ipWitness, o);
+
+            return proof;
 
         }
     }
