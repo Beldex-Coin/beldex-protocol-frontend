@@ -32,6 +32,45 @@ class RedeemProof {
 }
 
 
+class RedeemProver {
+    constructor() {
+        var params = new GeneratorParams(32);
+        var ipProver = new InnerProductProver();
+
+        this.generateProof = (statement, witness) => { // salt probably won't be used
+            var proof = new RedeemProof();
+
+            var statementHash = utils.hash(ABICoder.encodeParameters([
+                'bytes32[2]',
+                'bytes32[2]',
+                'bytes32[2]',
+                'uint256',
+                'address',
+            ], [
+                statement['CLn'],
+                statement['CRn'],
+                statement['y'],
+                statement['epoch'],
+                statement['sender'],
+            ])); // useless to break this out up top. "psychologically" easier
+
+            statement['CLn'] = bn128.unserialize(statement['CLn']);
+            statement['CRn'] = bn128.unserialize(statement['CRn']);
+            statement['y'] = bn128.unserialize(statement['y']);
+            witness['bDiff'] = new BN(witness['bDiff']).toRed(bn128.q);
+
+            var aL = new FieldVector(witness['bDiff'].toString(2, 32).split("").reverse().map((i) => new BN(i, 2).toRed(bn128.q)));
+            var aR = aL.plus(new BN(1).toRed(bn128.q).redNeg());
+            var alpha = bn128.randomScalar();
+            proof.BA = params.commit(alpha, aL, aR);
+            var sL = new FieldVector(Array.from({ length: 32 }).map(bn128.randomScalar));
+            var sR = new FieldVector(Array.from({ length: 32 }).map(bn128.randomScalar));
+            var rho = bn128.randomScalar(); // already reduced
+            proof.BS = params.commit(rho, sL, sR);
+
+        }
+    }
+}
 
 module.exports = RedeemProver;
 
