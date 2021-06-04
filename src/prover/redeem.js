@@ -68,6 +68,44 @@ class RedeemProver {
             var rho = bn128.randomScalar(); // already reduced
             proof.BS = params.commit(rho, sL, sR);
 
+            var y = utils.hash(ABICoder.encodeParameters([
+                'bytes32',
+                'bytes32[2]',
+                'bytes32[2]',
+            ], [
+                bn128.bytes(statementHash),
+                bn128.serialize(proof.BA),
+                bn128.serialize(proof.BS),
+            ]));
+
+            var ys = [new BN(1).toRed(bn128.q)];
+            for (var i = 1; i < 32; i++) { // it would be nice to have a nifty functional way of doing this.
+                ys.push(ys[i - 1].redMul(y));
+            }
+            ys = new FieldVector(ys); // could avoid this line by starting ys as a fieldvector and using "plus". not going to bother.
+            var z = utils.hash(bn128.bytes(y));
+            var zs = [z.redPow(new BN(2))];
+            var twos = [new BN(1).toRed(bn128.q)];
+            for (var i = 1; i < 32; i++) {
+                twos.push(twos[i - 1].redMul(new BN(2).toRed(bn128.q)));
+            }
+            var twoTimesZs = new FieldVector(twos).times(zs[0]);
+            var lPoly = new FieldVectorPolynomial(aL.plus(z.redNeg()), sL);
+            var rPoly = new FieldVectorPolynomial(ys.hadamard(aR.plus(z)).add(twoTimesZs), sR.hadamard(ys));
+            var tPolyCoefficients = lPoly.innerProduct(rPoly); // just an array of BN Reds... should be length 3
+            var polyCommitment = new PolyCommitment(params, tPolyCoefficients);
+            proof.tCommits = new GeneratorVector(polyCommitment.getCommitments()); // just 2 of them
+
+            var x = utils.hash(ABICoder.encodeParameters([
+                'bytes32',
+                'bytes32[2]',
+                'bytes32[2]',
+            ], [
+                bn128.bytes(z),
+                ...polyCommitment.getCommitments().map(bn128.serialize),
+            ]));
+
+
         }
     }
 }
