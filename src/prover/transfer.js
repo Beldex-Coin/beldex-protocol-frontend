@@ -46,5 +46,29 @@ class TransferProof {
     };
 }
 
+class TransferProver {
+    constructor() {
+        var params = new GeneratorParams(64);
+        var ipProver = new InnerProductProver();
+
+        var recursivePolynomials = (list, accum, a, b) => {
+            // as, bs are log(N)-lengthed.
+            // returns N-length list of coefficient vectors
+            // should take about N log N to compute.
+            if (a.length == 0) {
+                list.push(accum.coefficients);
+                return;
+            }
+            var aTop = a.pop();
+            var bTop = b.pop();
+            var left = new Polynomial([aTop.redNeg(), new BN(1).toRed(bn128.q).redSub(bTop)]);
+            var right = new Polynomial([aTop, bTop]);
+            recursivePolynomials(list, accum.mul(left), a, b);
+            recursivePolynomials(list, accum.mul(right), a, b);
+            a.push(aTop);
+            b.push(bTop);
+        }
+    }
+}
 
 module.exports = TransferProver;
