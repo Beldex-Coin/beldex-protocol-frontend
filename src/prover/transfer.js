@@ -68,6 +68,44 @@ class TransferProver {
             a.push(aTop);
             b.push(bTop);
         }
+
+        this.generateProof = (statement, witness) => {
+            var proof = new TransferProof();
+
+            var statementHash = utils.hash(ABICoder.encodeParameters([
+                'bytes32[2][]',
+                'bytes32[2][]',
+                'bytes32[2][]',
+                'bytes32[2]',
+                'bytes32[2][]',
+                'uint256',
+            ], [
+                statement['CLn'].map(bn128.serialize),
+                statement['CRn'].map(bn128.serialize),
+                statement['C'].map(bn128.serialize),
+                bn128.serialize(statement['D']),
+                statement['y'].map(bn128.serialize),
+                statement['epoch'],
+            ]));
+
+            statement['CLn'] = new GeneratorVector(statement['CLn']);
+            statement['CRn'] = new GeneratorVector(statement['CRn']);
+            statement['C'] = new GeneratorVector(statement['C']);
+            statement['y'] = new GeneratorVector(statement['y']);
+
+            witness['bTransfer'] = new BN(witness['bTransfer']).toRed(bn128.q);
+            witness['bDiff'] = new BN(witness['bDiff']).toRed(bn128.q);
+
+            var number = witness['bTransfer'].add(witness['bDiff'].shln(32)); // shln a red? check
+            var aL = new FieldVector(number.toString(2, 64).split("").reverse().map((i) => new BN(i, 2).toRed(bn128.q)));
+            var aR = aL.plus(new BN(1).toRed(bn128.q).redNeg());
+            var alpha = bn128.randomScalar();
+            proof.BA = params.commit(alpha, aL, aR);
+            var sL = new FieldVector(Array.from({ length: 64 }).map(bn128.randomScalar));
+            var sR = new FieldVector(Array.from({ length: 64 }).map(bn128.randomScalar));
+            var rho = bn128.randomScalar(); // already reduced
+            proof.BS = params.commit(rho, sL, sR);
+        }
     }
 }
 
