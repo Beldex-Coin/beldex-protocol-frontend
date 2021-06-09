@@ -105,6 +105,66 @@ class TransferProver {
             var sR = new FieldVector(Array.from({ length: 64 }).map(bn128.randomScalar));
             var rho = bn128.randomScalar(); // already reduced
             proof.BS = params.commit(rho, sL, sR);
+
+            var N = statement['y'].length();
+            if (N & (N - 1))
+                throw "Size must be a power of 2!"; // probably unnecessary... this won't be called directly.
+            var m = new BN(N).bitLength() - 1; // assuming that N is a power of 2?
+            // DON'T need to extend the params anymore. 64 will always be enough.
+            var r_A = bn128.randomScalar();
+            var r_B = bn128.randomScalar();
+            var a = new FieldVector(Array.from({ length: 2 * m }).map(bn128.randomScalar));
+            var b = new FieldVector((new BN(witness['index'][1]).toString(2, m) + new BN(witness['index'][0]).toString(2, m)).split("").reverse().map((i) => new BN(i, 2).toRed(bn128.q)));
+            var c = a.hadamard(b.times(new BN(2).toRed(bn128.q)).negate().plus(new BN(1).toRed(bn128.q))); // check this
+            var d = a.hadamard(a).negate();
+            var e = new FieldVector([a.getVector()[0].redMul(a.getVector()[m]), a.getVector()[0].redMul(a.getVector()[m])]);
+            var f = new FieldVector([a.getVector()[b.getVector()[0].toNumber() * m], a.getVector()[b.getVector()[m].toNumber() * m].redNeg()]);
+
+            proof.A = params.commit(r_A, a.concat(d).concat(e));
+            proof.B = params.commit(r_B, b.concat(c).concat(f));
+
+            var v = utils.hash(ABICoder.encodeParameters([
+                'bytes32',
+                'bytes32[2]',
+                'bytes32[2]',
+                'bytes32[2]',
+                'bytes32[2]',
+            ], [
+                bn128.bytes(statementHash),
+                bn128.serialize(proof.BA),
+                bn128.serialize(proof.BS),
+                bn128.serialize(proof.A),
+                bn128.serialize(proof.B),
+            ]));
+
+            var phi = Array.from({ length: m }).map(bn128.randomScalar);
+            var chi = Array.from({ length: m }).map(bn128.randomScalar);
+            var psi = Array.from({ length: m }).map(bn128.randomScalar);
+            var omega = Array.from({ length: m }).map(bn128.randomScalar);
+
+            var P = [];
+            var Q = [];
+            recursivePolynomials(P, new Polynomial(), a.getVector().slice(0, m), b.getVector().slice(0, m));
+            recursivePolynomials(Q, new Polynomial(), a.getVector().slice(m), b.getVector().slice(m));
+            P = Array.from({ length: m }).map((_, k) => new FieldVector(P.map((P_i) => P_i[k])));
+            Q = Array.from({ length: m }).map((_, k) => new FieldVector(Q.map((Q_i) => Q_i[k])));
+
+            proof.CLnG = Array.from({ length: m }).map((_, k) => statement['CLn'].commit(P[k]).add(statement['y'].getVector()[witness['index'][0]].mul(phi[k])));
+            proof.CRnG = Array.from({ length: m }).map((_, k) => statement['CRn'].commit(P[k]).add(params.getG().mul(phi[k])));
+            proof.C_0G = Array.from({ length: m }).map((_, k) => statement['C'].commit(P[k]).add(statement['y'].getVector()[witness['index'][0]].mul(chi[k])));
+            proof.DG = Array.from({ length: m }).map((_, k) => params.getG().mul(chi[k]));
+            proof.y_0G = Array.from({ length: m }).map((_, k) => statement['y'].commit(P[k]).add(statement['y'].getVector()[witness['index'][0]].mul(psi[k])));
+            proof.gG = Array.from({ length: m }).map((_, k) => params.getG().mul(psi[k]));
+            proof.C_XG = Array.from({ length: m }).map((_, k) => statement['D'].mul(omega[k]));
+            proof.y_XG = Array.from({ length: m }).map((_, k) => params.getG().mul(omega[k]));
+            var vPow = new BN(1).toRed(bn128.q);
+            for (var i = 0; i < N; i++) { // could turn this into a complicated reduce, but...
+                var temp = params.getG().mul(witness['bTransfer'].redMul(vPow));
+                var poly = i % 2 ? Q : P; // clunky, i know, etc. etc.
+                proof.C_XG = proof.C_XG.map((C_XG_k, k) => C_XG_k.add(temp.mul(poly[k].getVector()[(witness['index'][0] + N - (i - i % 2)) % N].redNeg().redAdd(poly[k].getVector()[(witness['index'][1] + N - (i - i % 2)) % N]))));
+                if (i != 0)
+                    vPow = vPow.redMul(v);
+            }
         }
     }
 }
