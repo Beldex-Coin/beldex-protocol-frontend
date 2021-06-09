@@ -165,6 +165,84 @@ class TransferProver {
                 if (i != 0)
                     vPow = vPow.redMul(v);
             }
+
+            var w = utils.hash(ABICoder.encodeParameters([
+                'bytes32',
+                'bytes32[2][]',
+                'bytes32[2][]',
+                'bytes32[2][]',
+                'bytes32[2][]',
+                'bytes32[2][]',
+                'bytes32[2][]',
+                'bytes32[2][]',
+                'bytes32[2][]',
+            ], [
+                bn128.bytes(v),
+                proof.CLnG.map(bn128.serialize),
+                proof.CRnG.map(bn128.serialize),
+                proof.C_0G.map(bn128.serialize),
+                proof.DG.map(bn128.serialize),
+                proof.y_0G.map(bn128.serialize),
+                proof.gG.map(bn128.serialize),
+                proof.C_XG.map(bn128.serialize),
+                proof.y_XG.map(bn128.serialize),
+            ]));
+
+            proof.f = b.times(w).add(a);
+            proof.z_A = r_B.redMul(w).redAdd(r_A);
+
+            var y = utils.hash(ABICoder.encodeParameters([
+                'bytes32',
+            ], [
+                bn128.bytes(w), // that's it?
+            ]));
+
+            var ys = [new BN(1).toRed(bn128.q)];
+            for (var i = 1; i < 64; i++) { // it would be nice to have a nifty functional way of doing this.
+                ys.push(ys[i - 1].redMul(y));
+            }
+            ys = new FieldVector(ys); // could avoid this line by starting ys as a fieldvector and using "plus". not going to bother.
+            var z = utils.hash(bn128.bytes(y));
+            var zs = [z.redPow(new BN(2)), z.redPow(new BN(3))];
+            var twos = [new BN(1).toRed(bn128.q)];
+            for (var i = 1; i < 32; i++) {
+                twos.push(twos[i - 1].redMul(new BN(2).toRed(bn128.q)));
+            }
+            var twoTimesZs = [];
+            for (var i = 0; i < 2; i++) {
+                for (var j = 0; j < 32; j++) {
+                    twoTimesZs.push(zs[i].redMul(twos[j]));
+                }
+            }
+            twoTimesZs = new FieldVector(twoTimesZs);
+            var lPoly = new FieldVectorPolynomial(aL.plus(z.redNeg()), sL);
+            var rPoly = new FieldVectorPolynomial(ys.hadamard(aR.plus(z)).add(twoTimesZs), sR.hadamard(ys));
+            var tPolyCoefficients = lPoly.innerProduct(rPoly); // just an array of BN Reds... should be length 3
+            var polyCommitment = new PolyCommitment(params, tPolyCoefficients);
+            proof.tCommits = new GeneratorVector(polyCommitment.getCommitments()); // just 2 of them
+
+            var x = utils.hash(ABICoder.encodeParameters([
+                'bytes32',
+                'bytes32[2]',
+                'bytes32[2]',
+            ], [
+                bn128.bytes(z),
+                ...polyCommitment.getCommitments().map(bn128.serialize),
+            ]));
+
+            var evalCommit = polyCommitment.evaluate(x);
+            proof.tHat = evalCommit.getX();
+            var tauX = evalCommit.getR(); // no longer public...
+            proof.mu = alpha.redAdd(rho.redMul(x));
+
+            var CRnR = bn128.zero;
+            var y_0R = bn128.zero;
+            var y_XR = bn128.zero;
+            var DR = bn128.zero;
+            var gR = bn128.zero;
+            var p = new FieldVector(Array.from({ length: N }).map(() => new BN().toRed(bn128.q))); // evaluations of poly_0 and poly_1 at w.
+            var q = new FieldVector(Array.from({ length: N }).map(() => new BN().toRed(bn128.q))); // verifier will compute these using f.
+
         }
     }
 }
