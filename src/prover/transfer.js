@@ -243,6 +243,91 @@ class TransferProver {
             var p = new FieldVector(Array.from({ length: N }).map(() => new BN().toRed(bn128.q))); // evaluations of poly_0 and poly_1 at w.
             var q = new FieldVector(Array.from({ length: N }).map(() => new BN().toRed(bn128.q))); // verifier will compute these using f.
 
+            var wPow = new BN(1).toRed(bn128.q);
+            for (var k = 0; k < m; k++) {
+                CRnR = CRnR.add(params.getG().mul(phi[k].redNeg().redMul(wPow)));
+                DR = DR.add(params.getG().mul(chi[k].redNeg().redMul(wPow)));
+                y_0R = y_0R.add(statement['y'].getVector()[witness['index'][0]].mul(psi[k].redNeg().redMul(wPow)));
+                gR = gR.add(params.getG().mul(psi[k].redNeg().redMul(wPow)));
+                y_XR = y_XR.add(proof.y_XG[k].mul(wPow.neg()));
+                p = p.add(P[k].times(wPow));
+                q = q.add(Q[k].times(wPow));
+                wPow = wPow.redMul(w);
+            }
+            CRnR = CRnR.add(statement['CRn'].getVector()[witness['index'][0]].mul(wPow));
+            y_0R = y_0R.add(statement['y'].getVector()[witness['index'][0]].mul(wPow));
+            DR = DR.add(statement['D'].mul(wPow));
+            gR = gR.add(params.getG().mul(wPow));
+            p = p.add(new FieldVector(Array.from({ length: N }).map((_, i) => i == witness['index'][0] ? wPow : new BN().toRed(bn128.q))));
+            q = q.add(new FieldVector(Array.from({ length: N }).map((_, i) => i == witness['index'][1] ? wPow : new BN().toRed(bn128.q))));
+
+            var convolver = new Convolver();
+            var y_p = convolver.convolution(p, statement['y']);
+            var y_q = convolver.convolution(q, statement['y']);
+            vPow = new BN(1).toRed(bn128.q);
+            for (var i = 0; i < N; i++) {
+                var y_poly = i % 2 ? y_q : y_p;
+                y_XR = y_XR.add(y_poly.getVector()[Math.floor(i / 2)].mul(vPow));
+                if (i > 0)
+                    vPow = vPow.redMul(v);
+            }
+
+            var k_sk = bn128.randomScalar();
+            var k_r = bn128.randomScalar();
+            var k_b = bn128.randomScalar();
+            var k_tau = bn128.randomScalar();
+
+            var A_y = gR.mul(k_sk);
+            var A_D = params.getG().mul(k_r);
+            var A_b = params.getG().mul(k_b).add(DR.mul(zs[0].redNeg()).add(CRnR.mul(zs[1])).mul(k_sk));
+            var A_X = y_XR.mul(k_r);
+            var A_t = params.getG().mul(k_b.redNeg()).add(params.getH().mul(k_tau));
+            var A_u = utils.gEpoch(statement['epoch']).mul(k_sk);
+
+            proof.c = utils.hash(ABICoder.encodeParameters([
+                'bytes32',
+                'bytes32[2]',
+                'bytes32[2]',
+                'bytes32[2]',
+                'bytes32[2]',
+                'bytes32[2]',
+                'bytes32[2]',
+            ], [
+                bn128.bytes(x),
+                bn128.serialize(A_y),
+                bn128.serialize(A_D),
+                bn128.serialize(A_b),
+                bn128.serialize(A_X),
+                bn128.serialize(A_t),
+                bn128.serialize(A_u),
+            ]));
+
+            proof.s_sk = k_sk.redAdd(proof.c.redMul(witness['sk']));
+            proof.s_r = k_r.redAdd(proof.c.redMul(witness['r']));
+            proof.s_b = k_b.redAdd(proof.c.redMul(witness['bTransfer'].redMul(zs[0]).redAdd(witness['bDiff'].redMul(zs[1])).redMul(wPow)));
+            proof.s_tau = k_tau.redAdd(proof.c.redMul(tauX.redMul(wPow)));
+
+            var gs = params.getGs();
+            var hPrimes = params.getHs().hadamard(ys.invert());
+            var hExp = ys.times(z).add(twoTimesZs);
+            var P = proof.BA.add(proof.BS.mul(x)).add(gs.sum().mul(z.redNeg())).add(hPrimes.commit(hExp)); // rename of P
+            P = P.add(params.getH().mul(proof.mu.redNeg())); // Statement P of protocol 1. should this be included in the calculation of v...?
+
+            var o = utils.hash(ABICoder.encodeParameters([
+                'bytes32',
+            ], [
+                bn128.bytes(proof.c),
+            ]));
+
+            var u_x = params.getG().mul(o); // Begin Protocol 1. this is u^x in Protocol 1. use our g for their u, our o for their x.
+            P = P.add(u_x.mul(proof.tHat)); // corresponds to P' in protocol 1.
+            var primeBase = new GeneratorParams(u_x, gs, hPrimes);
+            var ipStatement = { 'primeBase': primeBase, 'P': P };
+            var ipWitness = { 'l': lPoly.evaluate(x), 'r': rPoly.evaluate(x) };
+            proof.ipProof = ipProver.generateProof(ipStatement, ipWitness, o);
+
+            return proof;
+
         }
     }
 }
