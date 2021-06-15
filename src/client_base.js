@@ -210,6 +210,299 @@ class ClientBase {
 
     }
 
+    static async registered (beldex, pubKey) {
+        var encoded = ABICoder.encodeParameter("bytes32[2]", pubKey);
+        var hashedKey = soliditySha3(encoded);
+        return await beldex.methods.registered(hashedKey).call();
+    }
+
+    async setRedeemFeeStrategy (numerator, denominator) {
+        var that = this;
+        let transaction = that.beldex.methods.setRedeemFeeStrategy(numerator, denominator)
+                .send({from: that.home, gas: that.gasLimit})
+                .on('transactionHash', (hash) => {
+                    console.log("Change redeem fee submitted (txHash = \"" + hash + "\").");
+                })
+                .on('receipt', (receipt) => {
+                    console.log("Change redeem fee successful.");
+                })
+                .on('error', (error) => {
+                    console.log("Change redeem fee failed: " + error);
+                    throw error;
+                });
+        return transaction;
+    }
+
+    async setTransferFeeStrategy (numerator, denominator) {
+        var that = this;
+        let transaction = that.beldex.methods.setTransferFeeStrategy(numerator, denominator)
+                .send({from: that.home, gas: that.gasLimit})
+                .on('transactionHash', (hash) => {
+                    console.log("Change transfer fee submitted (txHash = \"" + hash + "\").");
+                })
+                .on('receipt', (receipt) => {
+                    console.log("Change transfer fee successful.");
+                })
+                .on('error', (error) => {
+                    console.log("Change transfer fee failed: " + error);
+                    throw error;
+                });
+        return transaction;
+    }
+
+    async setRoundBase (round_base) {
+        var that = this;
+        let transaction = that.beldex.methods.setRoundBase(round_base)
+                .send({from: that.home, gas: that.gasLimit})
+                .on('transactionHash', (hash) => {
+                    console.log("Set round base submitted (txHash = \"" + hash + "\").");
+                })
+                .on('receipt', (receipt) => {
+                    console.log("Set round base successful.");
+                    that.round_base = round_base;
+                })
+                .on('error', (error) => {
+                    console.log("Set epohc base failed: " + error);
+                    throw error;
+                });
+        return transaction;
+    }
+
+    async setRoundLen (round_len) {
+        var that = this;
+        let transaction = that.beldex.methods.setRoundLen(round_len)
+                .send({from: that.home, gas: that.gasLimit})
+                .on('transactionHash', (hash) => {
+                    console.log("Set round length submitted (txHash = \"" + hash + "\").");
+                })
+                .on('receipt', (receipt) => {
+                    console.log("Set round length successful.");
+                    that.round_len = round_len;
+                })
+                .on('error', (error) => {
+                    console.log("Set epohc length failed: " + error);
+                    throw error;
+                });
+        return transaction;
+    }
+
+    async setBeldexAgency (beldexAgency) {
+        var that = this;
+        let transaction = that.beldex.methods.setBeldexAgency(beldexAgency)
+                .send({from: that.home, gas: that.gasLimit})
+                .on('transactionHash', (hash) => {
+                    console.log("Set beldex agency submitted (txHash = \"" + hash + "\").");
+                })
+                .on('receipt', (receipt) => {
+                    console.log("Set beldex agency successful.");
+                })
+                .on('error', (error) => {
+                    console.log("Set beldex agency failed: " + error);
+                    throw error;
+                });
+        return transaction;
+    }
+
+
+    /**
+    Get the round corresponding to the given timestamp (if not given, use current time).
+    This round is based on time, and does not start from 0, because it simply divides the timestamp by round length.
+
+    TODO: should change to block based.
+
+    @param timestamp The given timestamp. Use current time if it is not given.
+
+    @return The round corresponding to the timestamp (current time if not given).
+    */
+    async _getRound (counter) {
+        var that = this;
+        if (that.round_base == 0) {
+            if (counter === undefined)
+                return Math.floor((await that.web3.eth.getBlockNumber()) / that.round_len);
+            else
+                return counter / that.round_len; 
+        }
+        else if (that.round_base == 1)
+            return Math.floor((counter === undefined ? (new Date).getTime() / 1000 : counter) / that.round_len);
+        else
+            throw new Error("Invalid round base.");
+    }
+
+    /**
+    Get seconds away from next round change.
+
+    TODO: should change to block based.
+    */
+    async _away () {
+        var that = this;
+        if (that.round_base == 0) {
+            var current = await that.web3.eth.getBlockNumber();
+            return Math.ceil(current / that.round_len) * that.round_len - current;
+        }
+        else if (that.round_base == 1) {
+            var current = (new Date).getTime();
+            return (Math.ceil(current / (that.round_len * 1000)) * (that.round_len * 1000) - current) / 1000;
+        }
+    }
+
+    checkRegistered () {
+        var that = this;
+        if (that.account.keypair === undefined)
+            throw "Call register() first to register an account.";
+    }
+
+    checkValue (value) {
+        if (value <= 0 || value > elgamal.MAX_PLAIN)
+            throw "Invalid value: " + value;
+    }
+
+    async getGuess () {
+        var that = this;
+        that.checkRegistered();
+        let encGuess = await that.beldex.methods.getGuess(that.account.publicKeySerialized()).call();
+        if (encGuess == null)
+            return 0;
+        var guess = aes.decrypt(encGuess.slice(2), that.account.aesKey);
+        guess = parseInt(guess, 16);
+        console.log("guess: ", guess);
+        return guess;
+    }
+
+    /**
+    Read account balance from Beldex contract.
+    
+    @return A promise that is resolved with the balance.
+    */
+    async readBalanceFromContract () {
+        var that = this;
+        that.checkRegistered();
+        let currentRound = await that._getRound();
+        let encBalances = await that.beldex.methods.getBalance([that.account.publicKeySerialized()], currentRound + 1).call();
+        var encBalance = elgamal.unserialize(encBalances[0]);
+
+        var guess = await that.getGuess();
+
+        var balance = elgamal.decrypt(encBalance, that.account.privateKey(), guess);
+        console.log("Read balance successfully: " + balance);
+        return balance;
+    }
+
+    /**
+    Synchronize the local account state with that in the Beldex contract.
+    Use this when we lose track of the local account state.
+    
+    @return A promise.
+    */
+    async syncAccountState () {
+        var that = this;
+        that.checkRegistered();
+        let encState = await that.beldex.methods.getAccountState(that.account.publicKeySerialized()).call();
+        var encAvailable = elgamal.unserialize(encState['y_available']);
+        var encPending = elgamal.unserialize(encState['y_pending']);
+
+        var guess = await that.getGuess();
+
+        that.account.setAvailable(
+            elgamal.decrypt(encAvailable, that.account.privateKey(), guess)
+        );
+        that.account.setPending(
+            elgamal.decrypt(encPending, that.account.privateKey())
+        );
+        that.account._state.lastRollOver = await that.beldex.methods.last_roll_over(that.account.publicKeyHash()).call();
+        that.account._state.nonceUsed = true;
+
+        console.log("Account synchronized with contract: available = ", that.account.available(), ", pending = ", that.account.pending(), ", lastRollOver = ", that.account.lastRollOver());
+    }
+
+    /**
+    [Transaction]
+    Register a public/private key pair, stored in this client's Beldex account.
+    This key pair is used for private interaction with the Beldex contract.
+    NOTE: this key pair is NOT an Ethereum address, but instead, it should normally
+    be used together with an Ethereum account address for the connection between
+    Beldex and plain Ethereum token.
+
+    @param secret The private key. If not given, then a new public/private key pair is
+        generated, otherwise construct the public/private key pair form the secret.
+
+    @return A promise that is resolved (or rejected) with the execution status of the
+        registraction transaction.
+    */
+    async register (secret, registerGasLimit) {
+        var that = this;
+        if (secret === undefined) {
+            that.account.keypair = utils.createAccount();
+            that.account.aesKey = aes.generateKey();
+        } else {
+            that.account.keypair = utils.keyPairFromSecret(secret);
+            that.account.aesKey = aes.generateKey(secret);
+        }
+        let isRegistered = await ClientBase.registered(that.beldex, that.account.publicKeySerialized());
+        if (isRegistered) {
+            // This branch would recover the account previously bound to the secret, and the corresponding balance.
+            return await that.syncAccountState();
+        } else {
+
+            var [c, s] = utils.sign(that.beldex._address, that.account.keypair);
+            if (registerGasLimit === undefined)
+                registerGasLimit = 190000;
+            let transaction = that.beldex.methods.register(that.account.publicKeySerialized(), c, s)
+                .send({from: that.home, gas: registerGasLimit})
+                .on('transactionHash', (hash) => {
+                    console.log("Registration submitted (txHash = \"" + hash + "\").");
+                })
+                .on('receipt', (receipt) => {
+                    console.log("Registration successful.");
+                })
+                .on('error', (error) => {
+                    that.account.keypair = undefined;
+                    console.log("Registration failed: " + error);
+                });
+            return transaction;
+        }
+    }
+
+    async login(secret) {
+      var that = this;
+      if (secret === undefined) {
+        that.account.keypair = utils.createAccount();
+        that.account.aesKey = aes.generateKey();
+      } else {
+        that.account.keypair = utils.keyPairFromSecret(secret);
+        that.account.aesKey = aes.generateKey(secret);
+      }
+      let isRegistered = await ClientBase.registered(
+        that.beldex,
+        that.account.publicKeySerialized(),
+      );
+      if (isRegistered) {
+        // This branch would recover the account previously bound to the secret, and the corresponding balance.
+        return await that.syncAccountState();
+      } else {
+        console.log('Login failed: this beldex account is not exists');
+        return -1;
+      }
+    }
+
+    /**
+    [Transaction]
+    Mint a given amount of tokens in the Beldex account.
+    This essentially converts plain tokens to Beldex tokens that are encrypted in the Beldex contract.
+    In other words, X tokens are deducted from this client's home account (Ethereum address), and X Beldex
+    tokens are added to this client's Beldex account.
+
+    The amount is represented in terms of a pre-defined unit. For example, if one unit represents 0.01 ETH,
+    then an amount of 100 represents 1 ETH.
+
+    @param value The amount to be minted into the Beldex account, in terms of unit.
+
+    @return A promise that is resolved (or rejected) with the execution status of the mint transaction.
+    */
+    async mint (value) {
+        throw new Error("Mint not implemented.");
+    }
+
+
 }
 
 module.exports = ClientBase;
