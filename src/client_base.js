@@ -387,6 +387,122 @@ class ClientBase {
         return balance;
     }
 
+    /**
+    Synchronize the local account state with that in the Beldex contract.
+    Use this when we lose track of the local account state.
+    
+    @return A promise.
+    */
+    async syncAccountState () {
+        var that = this;
+        that.checkRegistered();
+        let encState = await that.beldex.methods.getAccountState(that.account.publicKeySerialized()).call();
+        var encAvailable = elgamal.unserialize(encState['y_available']);
+        var encPending = elgamal.unserialize(encState['y_pending']);
+
+        var guess = await that.getGuess();
+
+        that.account.setAvailable(
+            elgamal.decrypt(encAvailable, that.account.privateKey(), guess)
+        );
+        that.account.setPending(
+            elgamal.decrypt(encPending, that.account.privateKey())
+        );
+        that.account._state.lastRollOver = await that.beldex.methods.last_roll_over(that.account.publicKeyHash()).call();
+        that.account._state.nonceUsed = true;
+
+        console.log("Account synchronized with contract: available = ", that.account.available(), ", pending = ", that.account.pending(), ", lastRollOver = ", that.account.lastRollOver());
+    }
+
+    /**
+    [Transaction]
+    Register a public/private key pair, stored in this client's Beldex account.
+    This key pair is used for private interaction with the Beldex contract.
+    NOTE: this key pair is NOT an Ethereum address, but instead, it should normally
+    be used together with an Ethereum account address for the connection between
+    Beldex and plain Ethereum token.
+
+    @param secret The private key. If not given, then a new public/private key pair is
+        generated, otherwise construct the public/private key pair form the secret.
+
+    @return A promise that is resolved (or rejected) with the execution status of the
+        registraction transaction.
+    */
+    async register (secret, registerGasLimit) {
+        var that = this;
+        if (secret === undefined) {
+            that.account.keypair = utils.createAccount();
+            that.account.aesKey = aes.generateKey();
+        } else {
+            that.account.keypair = utils.keyPairFromSecret(secret);
+            that.account.aesKey = aes.generateKey(secret);
+        }
+        let isRegistered = await ClientBase.registered(that.beldex, that.account.publicKeySerialized());
+        if (isRegistered) {
+            // This branch would recover the account previously bound to the secret, and the corresponding balance.
+            return await that.syncAccountState();
+        } else {
+
+            var [c, s] = utils.sign(that.beldex._address, that.account.keypair);
+            if (registerGasLimit === undefined)
+                registerGasLimit = 190000;
+            let transaction = that.beldex.methods.register(that.account.publicKeySerialized(), c, s)
+                .send({from: that.home, gas: registerGasLimit})
+                .on('transactionHash', (hash) => {
+                    console.log("Registration submitted (txHash = \"" + hash + "\").");
+                })
+                .on('receipt', (receipt) => {
+                    console.log("Registration successful.");
+                })
+                .on('error', (error) => {
+                    that.account.keypair = undefined;
+                    console.log("Registration failed: " + error);
+                });
+            return transaction;
+        }
+    }
+
+    async login(secret) {
+      var that = this;
+      if (secret === undefined) {
+        that.account.keypair = utils.createAccount();
+        that.account.aesKey = aes.generateKey();
+      } else {
+        that.account.keypair = utils.keyPairFromSecret(secret);
+        that.account.aesKey = aes.generateKey(secret);
+      }
+      let isRegistered = await ClientBase.registered(
+        that.beldex,
+        that.account.publicKeySerialized(),
+      );
+      if (isRegistered) {
+        // This branch would recover the account previously bound to the secret, and the corresponding balance.
+        return await that.syncAccountState();
+      } else {
+        console.log('Login failed: this beldex account is not exists');
+        return -1;
+      }
+    }
+
+    /**
+    [Transaction]
+    Mint a given amount of tokens in the Beldex account.
+    This essentially converts plain tokens to Beldex tokens that are encrypted in the Beldex contract.
+    In other words, X tokens are deducted from this client's home account (Ethereum address), and X Beldex
+    tokens are added to this client's Beldex account.
+
+    The amount is represented in terms of a pre-defined unit. For example, if one unit represents 0.01 ETH,
+    then an amount of 100 represents 1 ETH.
+
+    @param value The amount to be minted into the Beldex account, in terms of unit.
+
+    @return A promise that is resolved (or rejected) with the execution status of the mint transaction.
+    */
+    async mint (value) {
+        throw new Error("Mint not implemented.");
+    }
+
+
 }
 
 module.exports = ClientBase;
