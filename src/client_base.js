@@ -695,6 +695,128 @@ class ClientBase {
                 return sleep(wait * that.roundUnitTime).then(() => that.transfer(receiver, value, decoys, transferGasLimit));
             }
         }
+        console.log("Initiating transfer.");
+
+        receiver = bn128.unserialize(serializedReceiver);
+        if (bn128.pointEqual(receiver, account.publicKey()))
+            throw new Error("Sending to yourself is currently unsupported.");
+
+        decoys = decoys.map((decoy) => bn128.unserialize(bn128.encodedToSerialized(decoy)));
+
+        // Shuffle all participants
+        var y = [account.publicKey()]
+            .concat([receiver])
+            .concat(decoys);
+        var index = [];
+        var m = y.length;
+        while (m != 0) {
+            var i = Math.floor(Math.random() * m);
+            m--;
+            swap(y, i, m);
+            if (bn128.pointEqual(y[m], account.publicKey()))
+                index[0] = m;
+            else if (bn128.pointEqual(y[m], receiver))
+                index[1] = m;
+        } 
+
+        // make sure sender and receiver have opposite parity
+        if (index[0] % 2 == index[1] % 2) {
+                var temp = y[index[1]];
+                y[index[1]] = y[index[1] + (index[1] % 2 == 0 ? 1 : -1)];
+                y[index[1] + (index[1] % 2 == 0 ? 1 : -1)] = temp;
+                index[1] = index[1] + (index[1] % 2 == 0 ? 1 : -1);
+        }
+
+        var serializedY = y.map(bn128.serialize);
+
+        let currentRound = await that._getRound();
+        let encBalances = await that.beldex.methods.getBalance(serializedY, currentRound).call();
+
+        var unserialized = encBalances.map((ct) => elgamal.unserialize(ct)); 
+        if (unserialized.some((ct) => ct[0].eq(bn128.zero) && ct[1].eq(bn128.zero)))
+            throw new Error("Please make sure all participants are registered.");
+
+        var r = bn128.randomScalar();
+
+        var ciphertexts = y.map((party, i) => {
+            if (i == index[0])
+                return elgamal.encrypt(new BN(-value), party, r);
+            else if (i == index[1])
+                return elgamal.encrypt(new BN(value), party, r);
+            else
+                return elgamal.encrypt(new BN(0), party, r);
+        });
+        var C = ciphertexts.map(ct => ct[0]);
+        var D = ciphertexts[0][1]; // same for all ct[i][1] 
+
+        var CL = unserialized.map((ct, i) => ct[0].add(C[i]));
+        var CR = unserialized.map((ct) => ct[1].add(D));
+
+        var proof = that.service.proveTransfer(
+            CL, CR, 
+            C, D, 
+            y, 
+            state.lastRollOver, 
+            account.privateKey(), 
+            r, 
+            value,
+            state.available - value,
+            index
+        );
+
+        var u = bn128.serialize(utils.u(state.lastRollOver, account.privateKey()));
+
+        C = C.map(bn128.serialize);
+        D = bn128.serialize(D);
+
+
+        /* Can't use this estimate here because it seems to modify the contract state, making the proof invalid... */
+        //var transferGas = await that.beldex.methods.transfer(C, D, serializedY, u, proof)
+            //.estimateGas({from: that.home, value: that.gasLimit, gas: that.gasLimit});
+        //console.log("Estimated transfer gas: ", transferGas);
+
+        var gasPrice = await this.web3.eth.getGasPrice();
+
+        if (transferGasLimit === undefined)
+            transferGasLimit = 5470000 + 500000 * decoys.length;
+        var maxFeeValue = that.web3.utils.toBN(new BigNumber(transferGasLimit * gasPrice)).toString();
+        let transaction = 
+            that.beldex.methods.transfer(C, D, serializedY, u, proof)
+                .send({from: that.home, value: maxFeeValue, gas: transferGasLimit})
+                .on('transactionHash', (hash) => {
+                    that._transfers.add(hash);
+                    console.log("Transfer submitted (txHash = \"" + hash + "\")");
+                })
+                .on('receipt', async (receipt) => {
+                    account._state = await account.update();
+                    account._state.nonceUsed = true;
+                    account._state.pending -= value;
+                    console.log("Transfer of " + value + " was successful (uses gas: " + receipt["gasUsed"] + ")");  
+                    console.log("Account state: available = ", that.account.available(), ", pending = ", that.account.pending(), ", lastRollOver = ", that.account.lastRollOver());
+                })
+                .on('error', (error) => {
+                    console.log("Transfer failed: " + error);
+                    throw new Error(error);
+                });
+
+        return transaction;
+    }
+
+    /**
+    [Transaction]
+    Transfer a given amount of tokens from this Beldex account to a given receiver, if there is sufficient balance.
+    
+    The amount is represented in terms of a pre-defined unit. For example, if one unit represents 0.01 ETH,
+    then an amount of 100 represents 1 ETH.
+
+    @param receiver A Client object.
+    @param value The amount to be transfered, in terms of unit.
+
+    @return A promise that is resolved (or rejected) with the execution status of the mint transaction. 
+    */
+    async transferToClient (receiver, value) {
+        return this.transfer(receiver.account.publicKeyEncoded(), value);
+    }
 
 }
 
