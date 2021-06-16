@@ -502,6 +502,199 @@ class ClientBase {
         throw new Error("Mint not implemented.");
     }
 
+    /**
+    [Transaction]
+    Redeem a given amount of tokens from the Beldex account, if there is sufficient balance.
+    This essentially converts Beldex tokens to plain tokens, with X Beldex tokens deducted from
+    this client's Beldex account and X plain tokens added to this client's home account.
+
+    The amount is represented in terms of a pre-defined unit. For example, if one unit represents 0.01 ETH,
+    then an amount of 100 represents 1 ETH.
+
+    @param value The amount to be minted into the Beldex account, in terms of unit.
+
+    @return A promise that is resolved (or rejected) with the execution status of the mint transaction.
+    */
+    async redeem (value, redeemGasLimit) {
+        var that = this;
+        that.checkRegistered();
+        that.checkValue();
+        var account = that.account;
+        var state = await account.update();
+        if (value > account.balance())
+            throw new Error("Requested redeem amount of " + value + " exceeds account balance of " + account.balance() + ".");
+        var wait = await that._away();
+        //var seconds = Math.ceil(wait / 1000);
+        var unit = that.round_base == 0 ? "blocks" : "seconds";
+
+        // Wait for the pending incoming cash to be merged into the main available balance.
+        if (value > state.available) {
+            console.log("[Pending unmerged] Your redeem has been queued. Please wait " + wait + " " + unit + " for the release of your funds... ");
+            return sleep(wait * that.roundUnitTime).then(() => that.redeem(value));
+        }
+        if (state.nonceUsed) {
+            console.log("[Nonce used] Your redeem has been queued. Please wait " + wait + " " + unit + ", until the next round...");
+            return sleep(wait * that.roundUnitTime).then(() => that.redeem(value));
+        }
+
+        if (that.round_base == 0) {
+            // Heuristic condition to help reduce the possibility of failed transaction.
+            // If the remaining window of the current round is less than 1/4-th of the round length, then we will wait until the next round.
+            if ((that.round_len / 4) >= wait) {
+                console.log("[Short window] Your redeem has been queued. Please wait " + wait + " " + unit + ", until the next round...");
+                return sleep(wait * that.roundUnitTime).then(() => this.redeem(value));
+            }
+        }
+
+        if (that.round_base == 1) {
+            // Heuristic condition to reduce the possibility of failed transaction.
+            // If the remaining time of the current round is less than the time of minig a block, then
+            // we should just wait until the next round for the redeem, otherwise
+            // the redeem proof might be verified on a newer contract status (because of
+            // rolling over in the next round) and get rejected.
+            if (that.blockMinedTime >= wait * that.roundUnitTime) {
+                console.log("[Short window] Your redeem has been queued. Please wait " + wait + " " + unit + ", until the next round...");
+                return sleep(wait * that.roundUnitTime).then(() => this.redeem(value));
+            }
+        }
+
+        console.log("Initiating redeem.");
+
+        let currentRound = await that._getRound();
+        let encBalances = await that.beldex.methods.getBalance([account.publicKeySerialized()], currentRound).call();
+        var encBalance = elgamal.unserialize(encBalances[0]);
+        var encNewBalance = elgamal.serialize(elgamal.subPlain(encBalance, value));
+        
+        var proof = that.service.proveRedeem(
+            encNewBalance[0], 
+            encNewBalance[1], 
+            account.publicKeySerialized(), 
+            state.lastRollOver, 
+            that.home, 
+            account.privateKey(),
+            state.available - value
+        ); 
+        var u = bn128.serialize(utils.u(state.lastRollOver, account.privateKey()));
+
+        let encGuess = '0x' + aes.encrypt(new BN(account.available()).toString(16), account.aesKey);
+
+        if (redeemGasLimit === undefined)
+            redeemGasLimit = 3000000;
+        let transaction = that.beldex.methods.redeem(account.publicKeySerialized(), value, u, proof, encGuess)
+            .send({from: that.home, gas: redeemGasLimit})
+            .on('transactionHash', (hash) => {
+                console.log("redeem submitted (txHash = \"" + hash + "\").");
+            })
+            .on('receipt', async (receipt) => {
+                account._state = await account.update();
+                account._state.nonceUsed = true;
+                account._state.pending -= value;
+                console.log("redeem of " + value + " was successful (uses gas: " + receipt["gasUsed"] + ")");  
+                console.log("Account state: available = ", that.account.available(), ", pending = ", that.account.pending(), ", lastRollOver = ", that.account.lastRollOver());
+
+            })
+            .on('error', (error) => {
+                console.log("redeem failed: " + error);
+            });
+
+        return transaction;
+    }
+
+    /**
+    [Transaction]
+    Transfer a given amount of tokens from this Beldex account to a given receiver, if there is sufficient balance.
+    
+    The amount is represented in terms of a pre-defined unit. For example, if one unit represents 0.01 ETH,
+    then an amount of 100 represents 1 ETH.
+
+    @param receiver A serialized public key representing a Beldex receiver.
+    @param value The amount to be transfered, in terms of unit.
+    @param decoys An array of beldex users (represented by public keys) to anonymize the transfer.
+    @param transferGasLimit The max gas allowed to use for the transfer operation.
+
+    @return A promise that is resolved (or rejected) with the execution status of the mint transaction. 
+    */
+    async transfer (receiver, value, decoys, transferGasLimit) {
+        /*
+        Estimation of running time for a transfer.
+        */
+        var estimate = (size, contract) => {
+            // this expression is meant to be a relatively close upper bound of the time that proving + a few verifications will take, as a function of anonset size
+            // this function should hopefully give you good round lengths also for 8, 16, 32, etc... if you have very heavy traffic, may need to bump it up (many verifications)
+            // i calibrated this on _my machine_. if you are getting transfer failures, you might need to bump up the constants, recalibrate yourself, etc.
+            return (Math.ceil(size * Math.log(size) / Math.log(2) * 20 + 5200) + (contract ? 20 : 0)) / 1000;
+            // the 20-millisecond buffer is designed to give the callback time to fire (see below).
+        };
+
+        /*
+        Swap two values in an array.
+        */
+        var swap = (y, i, j) => {
+            var temp = y[i];
+            y[i] = y[j];
+            y[j] = temp;
+        };
+
+        var that = this;
+        that.checkRegistered();
+        that.checkValue();
+
+        if (decoys === undefined)
+            decoys = [];
+        receiver = receiver.trim();
+        decoys = decoys.map(decoy => decoy.trim());
+        
+        const anonymitySize = 2 + decoys.length;
+        if (anonymitySize & (anonymitySize - 1))
+            throw "Size of anonymity set must be a power of 2!";
+
+        // Check that the receiver is also registered
+        var serializedReceiver = bn128.encodedToSerialized(receiver);
+        let receiverRegistered = await ClientBase.registered(that.beldex, serializedReceiver);
+        if (!receiverRegistered)
+            throw new Error("Receiver has not been registered!");
+
+        var account = that.account;
+        var state = await account.update();
+        if (value > account.balance())
+            throw "Requested transfer amount of " + value + " exceeds account balance of " + account.balance() + ".";
+        var wait = await that._away();
+        var unit = that.round_base == 0 ? "blocks" : "seconds";
+
+        if (value > state.available) {
+            console.log("[Pending unmerged] Your transfer has been queued. Please wait " + wait + " " + unit + " for the release of your funds...");
+            return sleep(wait * that.roundUnitTime).then(() => that.transfer(receiver, value, decoys, transferGasLimit));
+        }
+        if (state.nonceUsed) {
+            console.log("[Nonce used] Your transfer has been queued. Please wait " + wait + " " + unit + " until the next round...");
+            return sleep(wait * that.roundUnitTime).then(() => that.transfer(receiver, value, decoys, transferGasLimit));
+        }
+
+        if (that.round_base == 0) {
+            // Heuristic condition to help reduce the possibility of failed transaction.
+            // If the remaining window of the current round is less than 1/4-th of the round length, then we will wait until the next round.
+            if ((that.round_len / 4) >= wait) {
+                console.log("[Short window] Your transfer has been queued. Please wait " + wait + " " + unit + ", until the next round...");
+                return sleep(wait * that.roundUnitTime).then(() => that.transfer(receiver, value, decoys, transferGasLimit));
+            }
+        }
+
+        if (that.round_base == 1) {
+            var estimated = estimate(anonymitySize, false);
+            if (estimated > that.round_len)
+                throw "The anonymity size (" + anonymitySize + ") you've requested might take longer than the round length (" + that.round_len + " seconds) to prove. Consider re-deploying, with an round length at least " + Math.ceil(estimate(anonymitySize, true)) + " seconds.";
+            // Heuristic condition to help reduce the possibility of failed transaction.
+            // If the estimated execution time is longer than the remaining time of this round, then 
+            // we should just wait until the round, otherwise it might happend that:
+            // This transfer's ZK proof is generated on Beldex contract status X, but after 'wait', the
+            // contract gets rolled over, leading to Beldex contract status Y, while this transfer will be
+            // verified on status Y and get rejected (this will likely happend because we estimate that the 
+            // transfer cannot complete in this round and thus will not be included in any block).
+            if (estimated > wait) {
+                console.log("[Short window] Your transfer has been queued. Please wait " + wait + " " + unit + ", until the next round...");
+                return sleep(wait * that.roundUnitTime).then(() => that.transfer(receiver, value, decoys, transferGasLimit));
+            }
+        }
 
 }
 
